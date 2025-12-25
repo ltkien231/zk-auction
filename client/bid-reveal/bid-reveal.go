@@ -1,6 +1,7 @@
 package bidreveal
 
 import (
+	"fmt"
 	"math/big"
 	"sbrac-auction/utils"
 )
@@ -8,26 +9,33 @@ import (
 // SystemParams contains the public parameters for the auction system
 type SystemParams struct {
 	G *big.Int // Generator g of the cyclic group
+	H *big.Int // Second generator h of the cyclic group
 	P *big.Int // Prime modulus
 	Q *big.Int // Order of the group (prime)
 }
 
-type PrivateBitPair struct {
+type BitPair struct {
 	X *big.Int // Random secret x_ij
 	S *big.Int // Random secret s_ij
+}
+
+type WhiteBoard struct {
+	PubXs [][]*big.Int // Public X_ij values from all bidders
 }
 
 var systemParams *SystemParams
 
 func init() {
-	p := big.NewInt(23) // Prime
-	q := big.NewInt(11) // Prime order where q | (p-1)
-	g := big.NewInt(2)  // Generator
+	p := big.NewInt(2039) // Prime
+	q := big.NewInt(1019) // Prime order where q | (p-1)
+	g := big.NewInt(9)    // Generator
+	h := big.NewInt(461)  // Second generator
 
 	systemParams = &SystemParams{
 		P: p,
 		Q: q,
 		G: g,
+		H: h,
 	}
 }
 
@@ -36,6 +44,7 @@ func DetermineClearingPrice(bids []int, bitLength int) int {
 	for i, bid := range bids {
 		bidders[i] = NewBidder(bid, i, bitLength, len(bids))
 	}
+	fmt.Println("Bidders initialized:", bidders[0])
 
 	n := len(bids)
 	if n == 0 {
@@ -43,98 +52,65 @@ func DetermineClearingPrice(bids []int, bitLength int) int {
 	}
 	l := bitLength
 
-	binaryBids := make([][]int, n)
-	for i := 0; i < n; i++ {
-		binaryBids[i] = utils.IntToBits(bids[i], l)
-	}
-
-	// bidders generate their private bit pairs
-	privateBitPairs := make([][]PrivateBitPair, n)
-	publicBitPairs := make([][]PrivateBitPair, n)
-	for i := 0; i < n; i++ {
-		privateBitPairs[i] = make([]PrivateBitPair, l)
-		publicBitPairs[i] = make([]PrivateBitPair, l)
-		for j := 0; j < l; j++ {
-			// x_ij and s_ij are exponents, so they must be in Z_Q
-			x := utils.RandBigInt(systemParams.Q)
-			s := utils.RandBigInt(systemParams.Q)
-			privateBitPairs[i][j] = PrivateBitPair{
-				X: x,
-				S: s,
-			}
-			publicBitPairs[i][j] = PrivateBitPair{
-				X: new(big.Int).Exp(systemParams.G, x, systemParams.P),
-				S: new(big.Int).Exp(systemParams.G, s, systemParams.P),
-			}
+	PubXs := make([][]*big.Int, len(bidders))
+	for i, bidder := range bidders {
+		PubXs[i] = make([]*big.Int, bidder.L)
+		for j := 0; j < bidder.L; j++ {
+			PubXs[i][j] = bidder.PublicBitPairs[j].X
 		}
 	}
 
-	// Compute product of all X_kj for each bit position j
-	// T_ij = (Product of all X_kj where k != i) = (Product of all X_kj) / X_ij
-	totalProdX := make([]*big.Int, l)
-	for j := 0; j < l; j++ {
-		prod := big.NewInt(1)
-		for i := 0; i < n; i++ {
-			prod = utils.MulMod(prod, publicBitPairs[i][j].X, systemParams.P)
-		}
-		totalProdX[j] = prod
-	}
-
-	// T_ij = (Product of all X_kj) / X_ij
-	tijs := make([][]*big.Int, n)
-	for i := 0; i < n; i++ {
-		tijs[i] = make([]*big.Int, l)
-		for j := 0; j < l; j++ {
-			// T_ij = totalProdX[j] / X_ij
-			t_ij := utils.DivMod(totalProdX[j], publicBitPairs[i][j].X, systemParams.P)
-			tijs[i][j] = t_ij
-		}
+	for _, bidder := range bidders {
+		bidder.ComputeTi(PubXs)
 	}
 
 	// determine clearing price bits
-	isLostBidder := make([]bool, n)
 	clearingPriceBits := make([]int, l)
 	for j := 0; j < l; j++ {
-		hasZero := HasZeroAtBitPosition(tijs, isLostBidder, binaryBids, privateBitPairs, j)
+		hasZero := HasZeroAtBitPosition(bidders, j)
+		fmt.Println("Clearing price bits:", j, hasZero)
 		if hasZero {
 			clearingPriceBits[j] = 0
 		} else {
 			clearingPriceBits[j] = 1
 		}
 	}
-
 	return utils.BitsToInt(clearingPriceBits)
 }
 
-func HasZeroAtBitPosition(tijs [][]*big.Int, isLostBidder []bool, binaryBids [][]int, privateBitPairs [][]PrivateBitPair, j int) bool {
-	n := len(binaryBids)
+func HasZeroAtBitPosition(bidders []*Bidder, j int) bool {
+	n := len(bidders)
 	if n == 0 {
 		return false
+	}
+
+	if j >= 12 {
+		fmt.Println("Bit position at", j, bidders[0].BinaryBid[j], bidders[1].BinaryBid[j], bidders[2].BinaryBid[j])
 	}
 
 	eProduct := big.NewInt(1)
 
 	for i := 0; i < n; i++ {
-		b_ij := binaryBids[i][j]
-		x_ij, s_ij := privateBitPairs[i][j].X, privateBitPairs[i][j].S
+		b_ij := bidders[i].BinaryBid[j]
+		x_ij, s_ij := bidders[i].PrivateBitPairs[j].X, bidders[i].PrivateBitPairs[j].S
 
 		e_ij := big.NewInt(0)
-		if b_ij == 0 && !isLostBidder[i] {
-			e_ij = new(big.Int).Exp(tijs[i][j], s_ij, systemParams.P)
+		if b_ij == 0 && !bidders[i].IsLost {
+			e_ij = new(big.Int).Exp(bidders[i].Ti[j], s_ij, systemParams.P)
 		} else {
-			e_ij = new(big.Int).Exp(tijs[i][j], x_ij, systemParams.P)
+			e_ij = new(big.Int).Exp(bidders[i].Ti[j], x_ij, systemParams.P)
 		}
 
 		eProduct = utils.MulMod(eProduct, e_ij, systemParams.P)
 	}
 
 	hasZero := false
-	if eProduct.Cmp(big.NewInt(1)) == 0 {
+	if eProduct.Cmp(big.NewInt(1)) != 0 { // e != 1 means at least one b_ij = 0
 		hasZero = true
 		for i := 0; i < n; i++ {
-			b_ij := binaryBids[i][j]
+			b_ij := bidders[i].BinaryBid[j]
 			if b_ij == 1 {
-				isLostBidder[i] = true
+				bidders[i].IsLost = true
 			}
 		}
 	}

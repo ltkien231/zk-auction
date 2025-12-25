@@ -1,41 +1,45 @@
 package bidreveal
 
 import (
+	"encoding/json"
+	"fmt"
 	"math/big"
 	"sbrac-auction/utils"
 )
 
 type Bidder struct {
-	ID              int // Unique identifier for the bidder
-	Bid             int // The bidder's bid
-	privateBitPairs []PrivateBitPair
-	publicBitPairs  []PrivateBitPair
-	isLost          bool
-	Ti              []*big.Int // T_ij values for each bit position
-	l               int        // Bit length of the bid
-	n               int        // Total number of bidders
+	ID              int        `json:"id"`
+	Bid             int        `json:"bid"`
+	BinaryBid       []int      `json:"binary_bid"`
+	PrivateBitPairs []BitPair  `json:"private_bit_pairs"`
+	PublicBitPairs  []BitPair  `json:"public_bit_pairs"`
+	IsLost          bool       `json:"is_lost"`
+	Ti              []*big.Int `json:"ti"`
+	L               int        `json:"l"`
+	N               int        `json:"n"`
 }
 
 func NewBidder(bid int, id int, bitLength int, n int) *Bidder {
 	bidder := &Bidder{
 		ID:              id,
 		Bid:             bid,
-		privateBitPairs: make([]PrivateBitPair, bitLength),
-		publicBitPairs:  make([]PrivateBitPair, bitLength),
-		isLost:          false,
+		BinaryBid:       utils.IntToBits(bid, bitLength),
+		PrivateBitPairs: make([]BitPair, bitLength),
+		PublicBitPairs:  make([]BitPair, bitLength),
+		IsLost:          false,
 		Ti:              make([]*big.Int, bitLength),
-		l:               bitLength,
-		n:               n,
+		L:               bitLength,
+		N:               n,
 	}
 
 	for j := 0; j < bitLength; j++ {
 		x := utils.RandBigInt(systemParams.Q)
 		s := utils.RandBigInt(systemParams.Q)
-		bidder.privateBitPairs[j] = PrivateBitPair{
+		bidder.PrivateBitPairs[j] = BitPair{
 			X: x,
 			S: s,
 		}
-		bidder.publicBitPairs[j] = PrivateBitPair{
+		bidder.PublicBitPairs[j] = BitPair{
 			X: new(big.Int).Exp(systemParams.G, x, systemParams.P),
 			S: new(big.Int).Exp(systemParams.G, s, systemParams.P),
 		}
@@ -45,16 +49,26 @@ func NewBidder(bid int, id int, bitLength int, n int) *Bidder {
 }
 
 func (b *Bidder) ComputeTi(publicXs [][]*big.Int) {
-	for j := 0; j < b.l; j++ {
+	for j := 0; j < b.L; j++ {
 		preProd := big.NewInt(1)
 		for k := 0; k < b.ID; k++ {
 			preProd = utils.MulMod(preProd, publicXs[k][j], systemParams.P)
 		}
 		postProd := big.NewInt(1)
-		for k := b.ID + 1; k < b.n; k++ {
+		for k := b.ID + 1; k < b.N; k++ {
 			postProd = utils.MulMod(postProd, publicXs[k][j], systemParams.P)
 		}
 
 		b.Ti[j] = utils.DivMod(preProd, postProd, systemParams.P)
 	}
+}
+
+func (b *Bidder) String() string {
+	jsonByte, err := json.MarshalIndent(b, "", "    ")
+	if err != nil {
+		fmt.Println(err)
+		return "" // DOTO: must string
+	}
+
+	return string(jsonByte)
 }
