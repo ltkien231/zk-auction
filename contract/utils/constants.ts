@@ -1,4 +1,4 @@
-export const L = 8; // bit length for bids
+export const L = 32; // bit length for bids
 export const N = 4; // number of bidders
 
 export const Q = 1019n; // Modulo cho số mũ (bids, random nonce r, zkp responses)

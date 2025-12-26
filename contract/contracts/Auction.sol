@@ -9,40 +9,42 @@ pragma solidity ^0.8.28;
 contract Auction {
     // ============ Constants ============
     
-    uint8 public constant BIT_LENGTH = 8; // Length of bid in bits
+    uint16 public constant BIT_LENGTH = 32; 
     
-    // Pedersen commitment parameters
     uint256 public constant P = 2039; 
     uint256 public constant Q = 1019; 
-    uint256 public constant G = 9;  // Small generator g
-    uint256 public constant H = 461;  // Small generator h
+    uint256 public constant G = 9; 
+    uint256 public constant H = 461;  
+ 
  
     // ============ State Variables ============
     
-    address public purchaser; // The buyer who deploys the contract
+    address public purchaser; 
 
-    address[] public whitelist; // whitelisted bidders
-    mapping(address => bool) public whitelisted;
-    uint256 public n; // number of bidders
+    address[] public whitelist; 
+    mapping(address bidder => bool isWhitelisted) public whitelisted;
+    uint256 public immutable N;
 
-    address[] public joinedList; // registered bidders
-    mapping(address => bool) public joined;
-    mapping(address => uint256) public bidderIndex; // bidder address to index
+    address[] public joinedList; 
+    mapping(address bidder => bool isJoined) public joined;
+    mapping(address bidder => uint256 bidderId) public bidderIndex; 
 
     uint256 public deposit;
-    bool public auctionEnded = false; // Whether auction has finalized
-    bool public isRefunded = false; // Whether deposits have been refunded
+    bool public auctionEnded = false; 
+    bool public isRefunded = false;
     
-    address public winner; // The winning bidder
-    uint256 public clearingPrice; // The final auction price
-    
+    address public winner; 
+    uint8[] public clearingPriceBits; 
+    uint256 public clearingPrice; 
 
-    mapping(uint256 => uint256) public commitments;
-    mapping(uint256 => mapping(uint256 => uint256)) public publicKeysX;
-    mapping(uint256 => mapping(uint256 => uint256)) public publicKeysS;
+    mapping(uint256 bidderId => uint256 commitment) public commitments;
+    mapping(uint256 bidderId => uint256[] X) public publicXs;
+    mapping(uint256 bidderId => uint256[] S) public publicSs;
+    mapping(uint256 bidderId => mapping(uint256 bitPosition => uint256 bitCommitment)) public bitCommits;
+    mapping(uint256 bitPosition => uint256 bitCommitCount) public bitCommitCounts;
+    mapping(uint256 bitPosition => uint256 bitCommitProduct) public bitCommitProds;
 
     // ============ Events ============
-  
     
     // ============ Modifiers ============
     
@@ -71,10 +73,13 @@ contract Auction {
         
         purchaser = msg.sender;
         deposit = msg.value;
-        n = _whitelist.length;
+        N = _whitelist.length;
         whitelist = _whitelist;
-        for (uint256 i = 0; i < n; i++) {
+        for (uint256 i = 0; i < N; i++) {
             whitelisted[_whitelist[i]] = true;
+        }
+        for (uint256 i = 0; i < BIT_LENGTH; i++) {
+            bitCommitProds[i] = 1;
         }
     }
     
@@ -83,18 +88,18 @@ contract Auction {
     /**
      * @notice Register as a bidder and submit commitments
      * @param _commitment Commitment C for the bidder
-     * @param _publicKeysX Array of public keys X_ij
-     * @param _publicKeysS Array of public keys S_ij
+     * @param _publicXs Array of public keys X_ij
+     * @param _publicSs Array of public keys S_ij
      */
     function addBidder(
         uint256 _commitment,
-        uint256[] calldata _publicKeysX,
-        uint256[] calldata _publicKeysS
+        uint256[] calldata _publicXs,
+        uint256[] calldata _publicSs
     ) external payable notEnded {
         require(whitelisted[msg.sender], "Not whitelisted");
         require(!joined[msg.sender], "Already registered");
         require(msg.value == deposit, "Must deposit to participate");
-        require(_publicKeysX.length == BIT_LENGTH && _publicKeysS.length == BIT_LENGTH, "Invalid publicKeys length");
+        require(_publicXs.length == BIT_LENGTH && _publicSs.length == BIT_LENGTH, "Invalid publicKeys length");
 
         // Register bidder
         uint256 BID = joinedList.length;
@@ -105,12 +110,9 @@ contract Auction {
         joinedList.push(msg.sender);
 
         // Store commitments and public keys
-        for (uint256 j = 0; j < BIT_LENGTH; j++) {
-            commitments[BID] = _commitment;
-            publicKeysX[BID][j] = _publicKeysX[j];
-            publicKeysS[BID][j] = _publicKeysS[j];            
-        }
-        
+        commitments[BID] = _commitment;
+        publicXs[BID] = _publicXs;
+        publicSs[BID] = _publicSs;            
     }
 
     // ============ Phase 3: Verify Winner ============
@@ -121,6 +123,30 @@ contract Auction {
     function setClearingPrice(uint256 _clearingPrice) external onlyPurchaser notEnded {
         require(winner == address(0), "Winner already declared");
         clearingPrice = _clearingPrice;
+    }
+
+    function submitBitCommitment(
+        uint256 bitPosition,
+        uint256 bitCommitment
+    ) external onlyBidder notEnded {
+        // TODO: require bidderId has not submitted for bitPosition yet
+        // TODO: check if we are in bitPosition phase
+        uint256 BID = bidderIndex[msg.sender];
+        bitCommits[BID][bitPosition] = bitCommitment;
+        bitCommitProds[bitPosition] = (bitCommitProds[bitPosition] * bitCommitment) % P;
+        
+        bitCommitCounts[bitPosition] += 1;
+        
+        if (bitCommitCounts[bitPosition] == N) {
+            if (bitCommitProds[bitPosition] == 1){
+                clearingPriceBits.push(1);
+            } else {
+                clearingPriceBits.push(0);
+            }
+            if (clearingPriceBits.length == BIT_LENGTH) {
+                clearingPrice = clearingPriceBitsToClearingPrice();
+            }
+        }
     }
     
     // ============ Phase 4: Verify Winner ============
@@ -185,15 +211,15 @@ contract Auction {
         require(success2, "Winner payment failed");        
     }
 
-    function modPow(uint256 base, uint256 exp, uint256 mod) internal pure returns (uint256) {
+    function modPow(uint256 base, uint256 exp, uint256 mod) private pure returns (uint256) {
         uint256 result = 1;
         base = base % mod;
         while (exp > 0) {
             if (exp % 2 == 1) {
                 result = (result * base) % mod;
             }
-            exp = exp >> 1;
             base = (base * base) % mod;
+            exp = exp >> 1;
         }
         return result;
     }
@@ -204,5 +230,28 @@ contract Auction {
         uint256 term1 = modPow(G, bid, P);
         uint256 term2 = modPow(H, randomness, P);
         return (term1 * term2) % P;
+    }
+
+    function getClearingPriceBits() external view returns (string memory) {
+        return string(abi.encodePacked(clearingPriceBits));
+    }
+
+    function clearingPriceBitsToClearingPrice() private view returns (uint256) {
+        uint256 price = 0;
+        for (uint256 j = 0; j < clearingPriceBits.length; j++) {
+            if (clearingPriceBits[j] == 1) {
+                price += (1 << (clearingPriceBits.length - 1 - j));
+            }
+        }
+        return price;
+    }
+
+    function getPublicXs() external view returns (uint256[][] memory) {
+        uint256 totalBidders = joinedList.length;
+        uint256[][] memory allPublicXs = new uint256[][](totalBidders);
+        for (uint256 i = 0; i < totalBidders; i++) {
+            allPublicXs[i] = publicXs[i];
+        }
+        return allPublicXs;
     }
 }

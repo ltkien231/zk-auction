@@ -48,15 +48,23 @@ export function modSub(a: bigint, b: bigint, mod: bigint): bigint {
   return (a - b + mod) % mod;
 }
 
-function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
-  let res = 1n;
+export function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+  if (mod === 0n) throw new Error("Modulus không thể bằng 0");
+  if (mod === 1n) return 0n;
+
+  let result = 1n;
   base = base % mod;
+
   while (exp > 0n) {
-    if (exp % 2n === 1n) res = (res * base) % mod;
+    if (exp % 2n === 1n) {
+      result = (result * base) % mod;
+    }
+
     base = (base * base) % mod;
-    exp /= 2n;
+    exp = exp >> 1n;
   }
-  return res;
+
+  return result;
 }
 
 export function pedersenCommit(bid: bigint, randomness: bigint): bigint {
