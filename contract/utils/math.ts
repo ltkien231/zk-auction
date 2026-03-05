@@ -1,3 +1,4 @@
+import { faker } from "@faker-js/faker/locale/zu_ZA";
 import { G, H, P, Q } from "./constants";
 
 export function intToBits(n: number, width: number): number[] {
@@ -18,6 +19,10 @@ export function bitsToInt(bits: number[]): number {
 
 export function randomInt(max: number): number {
   return Math.floor(Math.random() * max);
+}
+
+export function ranBigint(max: bigint): bigint {
+  return BigInt(faker.number.bigInt({ min: 1n, max: max-1n }));
 }
 
 function egcd(a: bigint, b: bigint): [bigint, bigint, bigint] {

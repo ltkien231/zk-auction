@@ -9,7 +9,7 @@ pragma solidity ^0.8.28;
 contract Auction {
     // ============ Constants ============
     
-    uint16 public constant BIT_LENGTH = 32; 
+    uint16 public constant BIT_LENGTH = 16; 
     
     uint256 public constant P = 2039; 
     uint256 public constant Q = 1019; 
@@ -95,7 +95,7 @@ contract Auction {
         uint256 _commitment,
         uint256[] calldata _publicXs,
         uint256[] calldata _publicSs
-    ) external payable notEnded {
+    ) external payable  {
         require(whitelisted[msg.sender], "Not whitelisted");
         require(!joined[msg.sender], "Already registered");
         require(msg.value == deposit, "Must deposit to participate");
@@ -112,23 +112,14 @@ contract Auction {
         // Store commitments and public keys
         commitments[BID] = _commitment;
         publicXs[BID] = _publicXs;
-        publicSs[BID] = _publicSs;            
+        publicSs[BID] = _publicSs;        
     }
 
     // ============ Phase 3: Verify Winner ============
-    /**
-     * @notice Purchaser sets the clearing price after verifying bids
-     * @param _clearingPrice The final clearing price of the auction
-     */
-    function setClearingPrice(uint256 _clearingPrice) external onlyPurchaser notEnded {
-        require(winner == address(0), "Winner already declared");
-        clearingPrice = _clearingPrice;
-    }
-
     function submitBitCommitment(
         uint256 bitPosition,
         uint256 bitCommitment
-    ) external onlyBidder notEnded {
+    ) external {
         // TODO: require bidderId has not submitted for bitPosition yet
         // TODO: check if we are in bitPosition phase
         uint256 BID = bidderIndex[msg.sender];
@@ -157,7 +148,7 @@ contract Auction {
      */
     function declareWinner(
         uint256 _randomness
-    ) external onlyBidder notEnded {
+    ) external {
         require(winner == address(0), "Winner already declared");
 
         uint256 BID = bidderIndex[msg.sender];
@@ -177,7 +168,7 @@ contract Auction {
     /**
      * @notice Refund deposits to losing bidders
      */
-    function refundLosers() external payable onlyPurchaser notEnded {
+    function refundLosers() external payable  {
         require(winner != address(0), "Winner not declared yet");
         require(!isRefunded, "Deposits already refunded");
         require(msg.value == clearingPrice, "Must send clearing price");
@@ -187,7 +178,6 @@ contract Auction {
             if (bidder != winner) {                
                 (bool success, ) = bidder.call{value: deposit}("");
                 require(success, "Refund failed");
-                
             }
         }
     }
@@ -197,7 +187,7 @@ contract Auction {
     /**
      * @notice Finalize auction and pay winner
      */
-    function finalize() external onlyPurchaser notEnded {
+    function finalize() external {
         require(winner != address(0), "Winner not declared");
         require(isRefunded, "Loser deposits not refunded yet");
         require(!auctionEnded, "Auction already finalized");

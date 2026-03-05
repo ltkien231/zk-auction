@@ -37,7 +37,7 @@ describe("Auction", function () {
   });
 
   describe("Auction", function () {
-    const bids = [324, 583, 903, 785];
+    const bids = [583, 324, 903, 785];
     const bidders = bids.map((bid, i) => new Bidder(i, bid));
 
     it("Should add bidders successfully", async function () {
@@ -86,21 +86,6 @@ describe("Auction", function () {
         publicClient,
       };
     }
-
-    // it("Should add bidders successfully", async function () {
-    //   const { auction, bidderWallets, purchaser, publicClient } = await loadFixture(deployAuctionFixture2);
-
-    //   // Step 3: Set clearing price
-    //   const minBid = Math.min(...bids);
-    //   await auction.write.setClearingPrice([BigInt(minBid)]);
-
-    //   // Step 4: Declare winner
-    //   const winnerIndex = bids.indexOf(minBid);
-    //   const winnerBidder = bidders[winnerIndex];
-    //   await auction.write.declareWinner([BigInt(winnerBidder.salt)], {
-    //     account: bidderWallets[winnerIndex].account,
-    //   });
-    // });
 
     it("Should complete full auction flow", async function () {
       const { auction, bidderWallets, purchaser, publicClient } = await loadFixture(deployAuctionFixture2);
