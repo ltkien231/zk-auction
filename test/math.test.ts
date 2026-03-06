@@ -1,53 +1,58 @@
 import { expect } from "chai";
-import { intToBits, bitsToInt, modAdd, modSub, modMul, modDiv, modInv, modPow, G, P } from "../utils";
+import { intToBits, bitsToInt, intToBitsMSB, pedersenCommit, pointToViem, viemToPoint, G_POINT, H_POINT, randomScalar } from "../utils";
 
 describe("Math Utils", function () {
-  describe("intToBits and bitsToInt", function () {
+  describe("intToBits and bitsToInt (LSB-first)", function () {
     it("should convert integer to bits and back", function () {
       const n = 13; // binary: 1101
-      const width = 4;
-      const bits = intToBits(n, width);
-      expect(bits).to.deep.equal([1, 0, 1, 1]);
-      const reconstructed = bitsToInt(bits);
-      expect(reconstructed).to.equal(n);
+      const bits = intToBits(n, 4);
+      expect(bits).to.deep.equal([1, 0, 1, 1]); // LSB first
+      expect(bitsToInt(bits)).to.equal(n);
     });
   });
 
-  describe("Modular Arithmetic", function () {
-    const mod = 17n;
+  describe("intToBitsMSB", function () {
+    it("should produce MSB-first bit array", function () {
+      expect(intToBitsMSB(13, 4)).to.deep.equal([1, 1, 0, 1]);
+      expect(intToBitsMSB(8, 4)).to.deep.equal([1, 0, 0, 0]);
+    });
+  });
 
-    it("should perform modular addition", function () {
-      const result = modAdd(15n, 10n, mod);
-      expect(result).to.equal(8n);
+  describe("G1 point encode/decode roundtrip", function () {
+    it("should encode and decode G_POINT", function () {
+      const viem = pointToViem(G_POINT);
+      const recovered = viemToPoint(viem);
+      expect(recovered.equals(G_POINT)).to.be.true;
     });
 
-    it("should perform modular subtraction", function () {
-      const result = modSub(5n, 10n, mod);
-      expect(result).to.equal(12n);
+    it("should encode and decode H_POINT", function () {
+      const viem = pointToViem(H_POINT);
+      const recovered = viemToPoint(viem);
+      expect(recovered.equals(H_POINT)).to.be.true;
     });
 
-    it("should perform modular multiplication", function () {
-      const result = modMul(4n, 5n, mod);
-      expect(result).to.equal(3n);
+    it("should encode and decode a random scalar multiplication", function () {
+      const s = randomScalar();
+      const p = G_POINT.multiply(s);
+      const recovered = viemToPoint(pointToViem(p));
+      expect(recovered.equals(p)).to.be.true;
+    });
+  });
+
+  describe("Pedersen commitment", function () {
+    it("should be deterministic given the same inputs", function () {
+      const bid = 42n;
+      const r   = 123456789n;
+      const c1  = pedersenCommit(bid, r);
+      const c2  = pedersenCommit(bid, r);
+      expect(c1.equals(c2)).to.be.true;
     });
 
-    it("should compute modular inverse", function () {
-      const result = modInv(3n, mod);
-      expect(result).to.equal(6n);
-    });
-
-    it("should perform modular division", function () {
-      const result = modDiv(4n, 3n, mod);
-      expect(result).to.equal(7n);
-    });
-
-    it("should perform modular exponentiation", function () {
-      const base = 2n;
-      const exp = 5n;
-      const result = modPow(base, exp, mod);
-      expect(result).to.equal(15n);
-
-      expect(modPow(G, 113n, P)).to.equal(435n);
+    it("different bids produce different commitments", function () {
+      const r  = randomScalar();
+      const c1 = pedersenCommit(100n, r);
+      const c2 = pedersenCommit(101n, r);
+      expect(c1.equals(c2)).to.be.false;
     });
   });
 });

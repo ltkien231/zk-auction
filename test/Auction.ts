@@ -1,155 +1,149 @@
-import { time, loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
 import { getAddress, parseEther } from "viem";
-import { Bidder, L, N } from "../utils";
+import { Bidder, G_POINT, H_POINT, L, N, pointToViem } from "../utils";
+
+const G_VIEM = pointToViem(G_POINT);
+const H_VIEM = pointToViem(H_POINT);
 
 describe("Auction", function () {
   const DEPOSIT = parseEther("1");
+  const bids    = [583, 324, 903, 785];
+  const bidders = bids.map((bid, i) => new Bidder(i, bid));
 
   async function deployAuctionFixture() {
-    // Contracts are deployed using the first signer/account by default
     const [purchaser, bidder1, bidder2, bidder3, bidder4] = await hre.viem.getWalletClients();
-    const bidderWallets = [bidder1, bidder2, bidder3, bidder4];
-    const biddersAddress = bidderWallets.map((b) => getAddress(b.account.address));
-    const auction = await hre.viem.deployContract("Auction", [biddersAddress], {
+    const bidderWallets   = [bidder1, bidder2, bidder3, bidder4];
+    const biddersAddress  = bidderWallets.map((b) => getAddress(b.account.address));
+
+    const auction = await hre.viem.deployContract("Auction", [biddersAddress, G_VIEM, H_VIEM], {
       value: DEPOSIT,
     });
 
     const publicClient = await hre.viem.getPublicClient();
-
-    return {
-      auction,
-      purchaser,
-      bidderWallets,
-      DEPOSIT,
-      publicClient,
-    };
+    return { auction, purchaser, bidderWallets, publicClient };
   }
 
-  describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { auction, bidderWallets, purchaser } = await loadFixture(deployAuctionFixture);
+  async function deployAndAddBiddersFixture() {
+    const { auction, purchaser, bidderWallets, publicClient } = await loadFixture(deployAuctionFixture);
 
+    for (let i = 0; i < bidders.length; i++) {
+      const b = bidders[i];
+      await auction.write.addBidder([b.commitment, b.pubX, b.pubS], {
+        account: bidderWallets[i].account,
+        value: DEPOSIT,
+      });
+    }
+
+    return { auction, purchaser, bidderWallets, publicClient };
+  }
+
+  // ─── Deployment ────────────────────────────────────────────────────────────
+
+  describe("Deployment", function () {
+    it("sets purchaser and N correctly", async function () {
+      const { auction, purchaser, bidderWallets } = await loadFixture(deployAuctionFixture);
       expect(await auction.read.purchaser()).to.equal(getAddress(purchaser.account.address));
       expect(await auction.read.N()).to.equal(BigInt(bidderWallets.length));
     });
   });
 
-  describe("Auction", function () {
-    const bids = [583, 324, 903, 785];
-    const bidders = bids.map((bid, i) => new Bidder(i, bid));
+  // ─── Add Bidders ───────────────────────────────────────────────────────────
 
-    it("Should add bidders successfully", async function () {
-      const { auction, bidderWallets, purchaser, publicClient } = await loadFixture(deployAuctionFixture);
+  describe("addBidder", function () {
+    it("stores commitment and public keys correctly", async function () {
+      const { auction } = await loadFixture(deployAndAddBiddersFixture);
 
-      // Step 2: Add bidders
-      for (let i = 0; i < bidders.length; i++) {
-        const b = bidders[i];
-        await auction.write.addBidder([b.commitment, b.pubX, b.pubS], {
-          account: bidderWallets[i].account,
-          value: parseEther("1"),
-        });
-      }
+      // Mapping auto-getters return flat arrays [x_a, x_b, y_a, y_b], not named objects.
+      // Check bidder 0 commitment
+      const stored = await auction.read.commitments([0n]) as unknown as readonly [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`];
+      const expected = bidders[0].commitment;
+      expect(stored[0]).to.equal(expected.x_a);
+      expect(stored[1]).to.equal(expected.x_b);
+      expect(stored[2]).to.equal(expected.y_a);
+      expect(stored[3]).to.equal(expected.y_b);
 
-      const firstCommitment = await auction.read.commitments([0n]);
-      expect(firstCommitment).to.equal(bidders[0].commitment);
-
-      const publicKeyX_33 = await auction.read.publicXs([3n, 3n]);
-      expect(publicKeyX_33).to.equal(bidders[3].pubX[3]);
+      // Check bidder 3, bit 3 public key X
+      const storedX = await auction.read.publicXs([3n, 3n]) as unknown as readonly [`0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`];
+      const expectedX = bidders[3].pubX[3];
+      expect(storedX[0]).to.equal(expectedX.x_a);
+      expect(storedX[1]).to.equal(expectedX.x_b);
     });
+  });
 
-    async function deployAuctionFixture2() {
-      // Contracts are deployed using the first signer/account by default
-      const [purchaser, bidder1, bidder2, bidder3, bidder4] = await hre.viem.getWalletClients();
-      const bidderWallets = [bidder1, bidder2, bidder3, bidder4];
-      const biddersAddress = bidderWallets.map((b) => getAddress(b.account.address));
-      const auction = await hre.viem.deployContract("Auction", [biddersAddress], {
-        value: DEPOSIT,
-      });
+  // ─── Full Auction Flow ─────────────────────────────────────────────────────
 
-      for (let i = 0; i < bidders.length; i++) {
-        const b = bidders[i];
-        await auction.write.addBidder([b.commitment, b.pubX, b.pubS], {
-          account: bidderWallets[i].account,
-          value: parseEther("1"),
-        });
-      }
+  describe("Full auction flow", function () {
+    it("determines correct clearing price and pays winner", async function () {
+      const { auction, bidderWallets, publicClient } = await loadFixture(deployAndAddBiddersFixture);
 
-      const publicClient = await hre.viem.getPublicClient();
-
-      return {
-        auction,
-        purchaser,
-        bidderWallets,
-        DEPOSIT,
-        publicClient,
-      };
-    }
-
-    it("Should complete full auction flow", async function () {
-      const { auction, bidderWallets, purchaser, publicClient } = await loadFixture(deployAuctionFixture2);
-      const getPubXs = async (bidder: Bidder) => {
-        for (let i = 0; i < L; i++) {
-          const x = await auction.read.getPublicXs();
-          bidder.computeBitCommitments(x);
-        }
-      };
+      // Compute tally keys from on-chain public keys
+      const allPubXs = await auction.read.getPublicXs();
       for (const bidder of bidders) {
-        await getPubXs(bidder);
+        bidder.computeBitCommitments(allPubXs);
       }
 
+      // Phase 3: submit bit commitments MSB → LSB
       for (let j = 0; j < L; j++) {
         for (const bidder of bidders) {
-          const bitCommitment =
-            bidder.bidBinary[j] === 0 && !bidder.isLost ? bidder.bitZeroCommitments[j] : bidder.bitOneCommitments[j];
-          await auction.write.submitBitCommitment([BigInt(j), bitCommitment], {
+          const bitCommit =
+            bidder.bidBinary[j] === 0 && !bidder.isLost
+              ? bidder.bitZeroCommitments[j]
+              : bidder.bitOneCommitments[j];
+
+          await auction.write.submitBitCommitment([BigInt(j), bitCommit], {
             account: bidderWallets[bidder.id].account,
           });
         }
+
         const clearingPriceBit = await auction.read.clearingPriceBits([BigInt(j)]);
         if (clearingPriceBit === 0) {
+          // Bidders with bit=1 at this position have lost
           for (const bidder of bidders) {
-            if (bidder.bidBinary[j] === 1) {
-              bidder.isLost = true;
-            }
+            if (bidder.bidBinary[j] === 1) bidder.isLost = true;
           }
         }
       }
 
       const clearingPrice = await auction.read.clearingPrice();
-      console.log("clearingPrice", clearingPrice);
+      const expectedMin   = BigInt(Math.min(...bids));
+      console.log("clearing price:", clearingPrice, "expected:", expectedMin);
+      expect(clearingPrice).to.equal(expectedMin);
 
-      // Step 4: Declare winner
-      const minBid = Math.min(...bids);
+      // Phase 4: declare winner
+      const minBid      = Math.min(...bids);
       const winnerIndex = bids.indexOf(minBid);
       const winnerBidder = bidders[winnerIndex];
-      await auction.write.declareWinner([BigInt(winnerBidder.salt)], {
+
+      await auction.write.declareWinner([winnerBidder.salt], {
         account: bidderWallets[winnerIndex].account,
       });
 
-      // Step 5: Withdraw funds
-      const nextBidderIndex = (winnerIndex + 1) % N;
-      const bidder1InitialBalance = await publicClient.getBalance({
-        address: bidderWallets[nextBidderIndex].account.address,
+      // Phase 5: refund losers
+      const nextIndex = (winnerIndex + 1) % N;
+      const loserBalanceBefore = await publicClient.getBalance({
+        address: bidderWallets[nextIndex].account.address,
       });
-      await auction.write.refundLosers({
-        value: BigInt(minBid),
-      });
-      const bidder1FinalBalance = await publicClient.getBalance({
-        address: bidderWallets[nextBidderIndex].account.address,
-      });
-      expect(bidder1FinalBalance).to.equal(bidder1InitialBalance + DEPOSIT);
 
-      // Finalize auction
-      const winnerInitialBalance = await publicClient.getBalance({
+      await auction.write.refundLosers({ value: BigInt(minBid) });
+
+      const loserBalanceAfter = await publicClient.getBalance({
+        address: bidderWallets[nextIndex].account.address,
+      });
+      expect(loserBalanceAfter).to.equal(loserBalanceBefore + DEPOSIT);
+
+      // Phase 6: finalize
+      const winnerBalanceBefore = await publicClient.getBalance({
         address: bidderWallets[winnerIndex].account.address,
       });
+
       await auction.write.finalize();
-      const winnerFinalBalance = await publicClient.getBalance({
+
+      const winnerBalanceAfter = await publicClient.getBalance({
         address: bidderWallets[winnerIndex].account.address,
       });
-      expect(winnerFinalBalance).to.equal(winnerInitialBalance + DEPOSIT + BigInt(minBid));
+      expect(winnerBalanceAfter).to.equal(winnerBalanceBefore + DEPOSIT + BigInt(minBid));
     });
   });
 });

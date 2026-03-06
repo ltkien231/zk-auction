@@ -1,247 +1,257 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
+import "./BLS12381.sol";
+
 /**
- * @title SBRAC - Sealed-Bid Reverse Auction Contract
- * @notice Implementation of sealed-bid reverse auction based on SBRAC paper
- * @dev ZK proofs are omitted for simplicity, only core auction logic is implemented
+ * @title SBRAC - Sealed-Bid Reverse Auction Contract (BLS12-381 ECC)
+ * @notice Implementation of sealed-bid reverse auction based on SBRAC paper.
+ *         Uses BLS12-381 G1 via EIP-2537 (Prague) precompiles.
+ *         ZK proof verification is omitted; core auction logic only.
  */
 contract Auction {
-    // ============ Constants ============
-    
-    uint16 public constant BIT_LENGTH = 16; 
-    
-    uint256 public constant P = 2039; 
-    uint256 public constant Q = 1019; 
-    uint256 public constant G = 9; 
-    uint256 public constant H = 461;  
- 
- 
-    // ============ State Variables ============
-    
-    address public purchaser; 
+    using BLS12381 for BLS12381.G1Point;
 
-    address[] public whitelist; 
-    mapping(address bidder => bool isWhitelisted) public whitelisted;
+    // ============ Constants ============
+
+    uint16 public constant BIT_LENGTH = 16;
+
+    // ============ Public Parameters ============
+
+    /// @notice Standard BLS12-381 G1 generator
+    BLS12381.G1Point public G_POINT;
+    /// @notice Second generator H = MAP_FP_TO_G1(keccak256("SBRAC_H")), no known dlog
+    BLS12381.G1Point public H_POINT;
+
+    // ============ State Variables ============
+
+    address public purchaser;
+
+    address[] public whitelist;
+    mapping(address => bool) public whitelisted;
     uint256 public immutable N;
 
-    address[] public joinedList; 
-    mapping(address bidder => bool isJoined) public joined;
-    mapping(address bidder => uint256 bidderId) public bidderIndex; 
+    address[] public joinedList;
+    mapping(address => bool) public joined;
+    mapping(address => uint256) public bidderIndex;
 
     uint256 public deposit;
-    bool public auctionEnded = false; 
-    bool public isRefunded = false;
-    
-    address public winner; 
-    uint8[] public clearingPriceBits; 
-    uint256 public clearingPrice; 
+    bool public auctionEnded;
+    bool public isRefunded;
 
-    mapping(uint256 bidderId => uint256 commitment) public commitments;
-    mapping(uint256 bidderId => uint256[] X) public publicXs;
-    mapping(uint256 bidderId => uint256[] S) public publicSs;
-    mapping(uint256 bidderId => mapping(uint256 bitPosition => uint256 bitCommitment)) public bitCommits;
-    mapping(uint256 bitPosition => uint256 bitCommitCount) public bitCommitCounts;
-    mapping(uint256 bitPosition => uint256 bitCommitProduct) public bitCommitProds;
+    address public winner;
+    uint8[] public clearingPriceBits;
+    uint256 public clearingPrice;
 
-    // ============ Events ============
-    
+    /// @dev Pedersen commitments: C_i = bid_i * G + r_i * H
+    mapping(uint256 => BLS12381.G1Point) public commitments;
+    /// @dev AV-net round-1 public keys X_ij = x_ij * G, one per bidder per bit
+    mapping(uint256 => BLS12381.G1Point[]) public publicXs;
+    /// @dev AV-net round-1 public keys S_ij = s_ij * H, one per bidder per bit
+    mapping(uint256 => BLS12381.G1Point[]) public publicSs;
+    /// @dev Running sum of bit commitments per bit position (AV-net round-2 aggregate)
+    mapping(uint256 => BLS12381.G1Point) public bitCommitSums;
+    mapping(uint256 => uint256) public bitCommitCounts;
+
     // ============ Modifiers ============
-    
+
     modifier onlyPurchaser() {
         require(msg.sender == purchaser, "Only purchaser can call");
         _;
     }
-    
+
     modifier onlyBidder() {
         require(joined[msg.sender], "Not a registered bidder");
         _;
     }
-    
+
     modifier notEnded() {
         require(!auctionEnded, "Auction already ended");
         _;
     }
-    
+
     // ============ Phase 1: Constructor ============
-    
+
     /**
-     * @notice Deploy the auction contract
+     * @notice Deploy the auction contract.
+     * @param _whitelist   Addresses allowed to participate as bidders.
+     * @param _gPoint      BLS12-381 G1 generator (128 bytes as four bytes32).
+     * @param _hPoint      Second generator H (128 bytes as four bytes32).
      */
-    constructor(address[] memory _whitelist) payable {
+    constructor(
+        address[] memory _whitelist,
+        BLS12381.G1Point memory _gPoint,
+        BLS12381.G1Point memory _hPoint
+    ) payable {
         require(msg.value > 0, "Purchaser must deposit");
-        
+
         purchaser = msg.sender;
-        deposit = msg.value;
-        N = _whitelist.length;
+        deposit   = msg.value;
+        N         = _whitelist.length;
         whitelist = _whitelist;
-        for (uint256 i = 0; i < N; i++) {
+        G_POINT   = _gPoint;
+        H_POINT   = _hPoint;
+
+        for (uint256 i = 0; i < _whitelist.length; i++) {
             whitelisted[_whitelist[i]] = true;
         }
-        for (uint256 i = 0; i < BIT_LENGTH; i++) {
-            bitCommitProds[i] = 1;
-        }
+        // bitCommitSums default to (0,0,0,0) = point at infinity — correct identity
     }
-    
-    // ============ Phase 2: Add Bidders & Submit Commitments ============
-    
+
+    // ============ Phase 2: Add Bidders ============
+
     /**
-     * @notice Register as a bidder and submit commitments
-     * @param _commitment Commitment C for the bidder
-     * @param _publicXs Array of public keys X_ij
-     * @param _publicSs Array of public keys S_ij
+     * @notice Register as a bidder and submit Pedersen commitment + AV-net public keys.
+     * @param _commitment  C = bid*G + r*H  (G1 point)
+     * @param _publicXs    X_ij = x_ij * G  (one G1 point per bit position)
+     * @param _publicSs    S_ij = s_ij * H  (one G1 point per bit position)
      */
     function addBidder(
-        uint256 _commitment,
-        uint256[] calldata _publicXs,
-        uint256[] calldata _publicSs
-    ) external payable  {
+        BLS12381.G1Point calldata _commitment,
+        BLS12381.G1Point[] calldata _publicXs,
+        BLS12381.G1Point[] calldata _publicSs
+    ) external payable {
         require(whitelisted[msg.sender], "Not whitelisted");
         require(!joined[msg.sender], "Already registered");
-        require(msg.value == deposit, "Must deposit to participate");
-        require(_publicXs.length == BIT_LENGTH && _publicSs.length == BIT_LENGTH, "Invalid publicKeys length");
+        require(msg.value == deposit, "Must match purchaser deposit");
+        require(
+            _publicXs.length == BIT_LENGTH && _publicSs.length == BIT_LENGTH,
+            "Wrong number of public keys"
+        );
 
-        // Register bidder
-        uint256 BID = joinedList.length;
-        bidderIndex[msg.sender] = BID;
-
-        whitelisted[msg.sender] = true;
-        joined[msg.sender] = true;
+        uint256 bid = joinedList.length;
+        bidderIndex[msg.sender] = bid;
+        joined[msg.sender]      = true;
         joinedList.push(msg.sender);
 
-        // Store commitments and public keys
-        commitments[BID] = _commitment;
-        publicXs[BID] = _publicXs;
-        publicSs[BID] = _publicSs;        
+        commitments[bid] = _commitment;
+        for (uint256 j = 0; j < BIT_LENGTH; j++) {
+            publicXs[bid].push(_publicXs[j]);
+            publicSs[bid].push(_publicSs[j]);
+        }
     }
 
-    // ============ Phase 3: Verify Winner ============
+    // ============ Phase 3: Calculate Clearing Price ============
+
+    /**
+     * @notice Submit the AV-net round-2 bit commitment for a given bit position.
+     *         Winners (bit=0) submit s_j * T_i; losers (bit=1) submit x_j * T_i.
+     *         When all N bidders have submitted, the sum reveals the clearing price bit:
+     *           isInfinity(sum) => all bits are 1 => clearing price bit = 1
+     *           !isInfinity(sum) => at least one bit is 0 => clearing price bit = 0
+     * @param _bitPosition  Bit index (0 = MSB).
+     * @param _bitCommit    The AV-net cryptogram (G1 point).
+     */
     function submitBitCommitment(
-        uint256 bitPosition,
-        uint256 bitCommitment
-    ) external {
+        uint256 _bitPosition,
+        BLS12381.G1Point calldata _bitCommit
+    ) external onlyBidder notEnded {
         // TODO: require bidderId has not submitted for bitPosition yet
         // TODO: check if we are in bitPosition phase
-        uint256 BID = bidderIndex[msg.sender];
-        bitCommits[BID][bitPosition] = bitCommitment;
-        bitCommitProds[bitPosition] = (bitCommitProds[bitPosition] * bitCommitment) % P;
-        
-        bitCommitCounts[bitPosition] += 1;
-        
-        if (bitCommitCounts[bitPosition] == N) {
-            if (bitCommitProds[bitPosition] == 1){
+        require(_bitPosition < BIT_LENGTH, "Invalid bit position");
+
+        BLS12381.G1Point memory currentSum = bitCommitSums[_bitPosition];
+        bitCommitSums[_bitPosition] = BLS12381.add(currentSum, _bitCommit);
+        bitCommitCounts[_bitPosition] += 1;
+
+        if (bitCommitCounts[_bitPosition] == N) {
+            BLS12381.G1Point memory finalSum = bitCommitSums[_bitPosition];
+            if (BLS12381.isInfinity(finalSum)) {
                 clearingPriceBits.push(1);
             } else {
                 clearingPriceBits.push(0);
             }
             if (clearingPriceBits.length == BIT_LENGTH) {
-                clearingPrice = clearingPriceBitsToClearingPrice();
+                clearingPrice = _bitsToPrice();
             }
         }
     }
-    
-    // ============ Phase 4: Verify Winner ============
-    
+
+    // ============ Phase 4: Declare Winner ============
+
     /**
-     * @notice Winner declares themselves by revealing their bid
-     * @param _randomness The randomness used in commitment
+     * @notice Winner reveals their bid randomness to prove they hold the lowest bid.
+     * @param _randomness  The salt r used in the Pedersen commitment C = bid*G + r*H.
      */
-    function declareWinner(
-        uint256 _randomness
-    ) external {
+    function declareWinner(uint256 _randomness) external onlyBidder notEnded {
+        require(clearingPriceBits.length == BIT_LENGTH, "Clearing price not determined");
         require(winner == address(0), "Winner already declared");
 
-        uint256 BID = bidderIndex[msg.sender];
-        uint256 bidCommitment = commitments[BID];
-        
-        require(
-            bidCommitment == pedersenCommit(clearingPrice, _randomness),
-            "Invalid commitment - bid doesn't match clearing price"
+        uint256 bid = bidderIndex[msg.sender];
+        BLS12381.G1Point memory stored = commitments[bid];
+
+        BLS12381.G1Point memory g = G_POINT;
+        BLS12381.G1Point memory h = H_POINT;
+        BLS12381.G1Point memory computed = BLS12381.add(
+            BLS12381.scalarMul(g, clearingPrice),
+            BLS12381.scalarMul(h, _randomness)
         );
-        
+
+        require(BLS12381.eq(stored, computed), "Commitment mismatch");
         winner = msg.sender;
-        
     }
-    
-    // ============ Phase 5: Refund Deposits ============
-    
+
+    // ============ Phase 5: Refund Losers ============
+
     /**
-     * @notice Refund deposits to losing bidders
+     * @notice Purchaser sends the clearing price and refunds deposits to losing bidders.
      */
-    function refundLosers() external payable  {
-        require(winner != address(0), "Winner not declared yet");
-        require(!isRefunded, "Deposits already refunded");
+    function refundLosers() external payable onlyPurchaser notEnded{
+        require(winner != address(0), "Winner not declared");
+        require(!isRefunded, "Already refunded");
         require(msg.value == clearingPrice, "Must send clearing price");
+
         isRefunded = true;
         for (uint256 i = 0; i < joinedList.length; i++) {
             address bidder = joinedList[i];
-            if (bidder != winner) {                
-                (bool success, ) = bidder.call{value: deposit}("");
-                require(success, "Refund failed");
+            if (bidder != winner) {
+                (bool ok,) = bidder.call{value: deposit}("");
+                require(ok, "Refund failed");
             }
         }
     }
-    
-    // ============ Phase 6: Finalize Auction ============
-    
+
+    // ============ Phase 6: Finalize ============
+
     /**
-     * @notice Finalize auction and pay winner
+     * @notice Finalize the auction: return purchaser deposit and pay winner.
      */
-    function finalize() external {
+    function finalize() external onlyPurchaser notEnded{
         require(winner != address(0), "Winner not declared");
-        require(isRefunded, "Loser deposits not refunded yet");
-        require(!auctionEnded, "Auction already finalized");
+        require(isRefunded, "Losers not refunded");
+
         auctionEnded = true;
-        
-        // Transfer payments
-        (bool success1, ) = purchaser.call{value: deposit}("");
-        require(success1, "Purchaser refund failed");
-        
-        (bool success2, ) = winner.call{value: deposit + clearingPrice}("");
-        require(success2, "Winner payment failed");        
+
+        (bool ok1,) = purchaser.call{value: deposit}("");
+        require(ok1, "Purchaser refund failed");
+
+        (bool ok2,) = winner.call{value: deposit + clearingPrice}("");
+        require(ok2, "Winner payment failed");
     }
 
-    function modPow(uint256 base, uint256 exp, uint256 mod) private pure returns (uint256) {
-        uint256 result = 1;
-        base = base % mod;
-        while (exp > 0) {
-            if (exp % 2 == 1) {
-                result = (result * base) % mod;
-            }
-            base = (base * base) % mod;
-            exp = exp >> 1;
+    // ============ Views ============
+
+    /**
+     * @notice Returns all bidders' AV-net X public keys as a 2D array.
+     *         Used off-chain to compute tally keys T_i.
+     */
+    function getPublicXs() external view returns (BLS12381.G1Point[][] memory) {
+        uint256 total = joinedList.length;
+        BLS12381.G1Point[][] memory all = new BLS12381.G1Point[][](total);
+        for (uint256 i = 0; i < total; i++) {
+            all[i] = publicXs[i];
         }
-        return result;
+        return all;
     }
 
-    function pedersenCommit(uint256 bid, uint256 randomness) public pure returns (uint256) {
-        require(bid < Q, "Bid must be smaller than Q");
-        require(randomness < Q, "Randomness must be smaller than Q"); 
-        uint256 term1 = modPow(G, bid, P);
-        uint256 term2 = modPow(H, randomness, P);
-        return (term1 * term2) % P;
-    }
+    // ============ Internal ============
 
-    function getClearingPriceBits() external view returns (string memory) {
-        return string(abi.encodePacked(clearingPriceBits));
-    }
-
-    function clearingPriceBitsToClearingPrice() private view returns (uint256) {
-        uint256 price = 0;
-        for (uint256 j = 0; j < clearingPriceBits.length; j++) {
+    function _bitsToPrice() private view returns (uint256 price) {
+        uint256 len = clearingPriceBits.length;
+        for (uint256 j = 0; j < len; j++) {
             if (clearingPriceBits[j] == 1) {
-                price += (1 << (clearingPriceBits.length - 1 - j));
+                price += (1 << (len - 1 - j));
             }
         }
-        return price;
-    }
-
-    function getPublicXs() external view returns (uint256[][] memory) {
-        uint256 totalBidders = joinedList.length;
-        uint256[][] memory allPublicXs = new uint256[][](totalBidders);
-        for (uint256 i = 0; i < totalBidders; i++) {
-            allPublicXs[i] = publicXs[i];
-        }
-        return allPublicXs;
     }
 }

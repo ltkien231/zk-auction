@@ -3,6 +3,11 @@ import "@nomicfoundation/hardhat-toolbox-viem";
 
 const config: HardhatUserConfig = {
   solidity: "0.8.28",
+  networks: {
+    hardhat: {
+      hardfork: "prague",
+    },
+  },
   gasReporter: {
     enabled: true,
     currency: "USD",

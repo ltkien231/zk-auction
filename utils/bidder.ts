@@ -1,92 +1,87 @@
-import { G, H, P, Q, L, N } from "./constants";
-import { ranBigint, pedersenCommit, modPow, modMul, modDiv, modSub } from "./math";
-import {keccak256, encodePacked} from 'viem'
-
-type XSProof ={
-  gPowC1: bigint;
-  gPowC2: bigint;
-  r1: bigint;
-  r2: bigint;
-}
+import { G_POINT, H_POINT, G_ZERO, N, L } from "./constants";
+import {
+  G1Point,
+  G1PointViem,
+  randomScalar,
+  scalarMul,
+  pointAdd,
+  pointSub,
+  pedersenCommit,
+  pointToViem,
+  viemToPoint,
+  intToBitsMSB,
+} from "./math";
 
 export class Bidder {
   id: number;
   bid: number;
-  bidBinary: number[] = [];
+  /** MSB-first binary representation (bidBinary[0] = MSB). */
+  bidBinary: number[];
   salt: bigint;
-  commitment: bigint;
-  privX: bigint[] = [];
-  pubX: bigint[] = [];
-  privS: bigint[] = [];
-  pubS: bigint[] = [];
-  xsProof: XSProof[] = [];
-  bitZeroCommitments: bigint[] = [];
-  bitOneCommitments: bigint[] = [];
-  publicXs: readonly (readonly bigint[])[] = [];
-  isLost: boolean = false;
-  c1: bigint = 0n;
-  c2: bigint = 0n;
-  c: bigint = 0n;
+  isLost = false;
+
+  private _commitment: G1Point;
+  private _privX: bigint[]   = [];
+  private _pubX:  G1Point[]  = [];
+  private _privS: bigint[]   = [];
+  private _pubS:  G1Point[]  = [];
+  private _bitZeroCommits: G1Point[] = [];
+  private _bitOneCommits:  G1Point[] = [];
 
   constructor(id: number, bid: number) {
-    this.id = id;
-
-    this.bid = bid;
-    this.bidBinary = numberToBinaryArray(bid, L);
-
-    this.salt = ranBigint(Q);
-    this.c = ranBigint(Q);
-    this.c1 = ranBigint(Q);
-    this.c2 = ranBigint(Q);
-    
-    this.commitment = pedersenCommit(BigInt(bid), BigInt(this.salt));
+    this.id        = id;
+    this.bid       = bid;
+    this.bidBinary = intToBitsMSB(bid, L);
+    this.salt      = randomScalar();
+    this._commitment = pedersenCommit(BigInt(bid), this.salt);
 
     for (let j = 0; j < L; j++) {
-      const x = ranBigint(Q);
-      this.privX.push(x);
-      this.pubX.push(modPow(G, x, P));
+      const x = randomScalar();
+      this._privX.push(x);
+      this._pubX.push(scalarMul(G_POINT, x));
 
-      const s = ranBigint(Q);
-      this.privS.push(s);
-      this.pubS.push(modPow(H, s, P));
-
-      // ZKP
-      const xsProof: XSProof = {
-        gPowC1: modPow(G, this.c1, P),
-        gPowC2: modPow(G, this.c2, P),
-        r1: 0n,
-        r2: 0n,
-      };
-      
-      const packed = encodePacked(['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'], [G, xsProof.gPowC1, xsProof.gPowC2, modPow(G, x, P), modPow(G, s, P), BigInt(this.id), BigInt(j)]);
-      const hash = BigInt(keccak256(packed))
-
-      xsProof.r1 = modSub(this.c1, modMul(x, hash, Q), Q); 
-      xsProof.r2 = modSub(this.c2, modMul(s, hash, Q), Q); 
-      this.xsProof.push(xsProof);
+      const s = randomScalar();
+      this._privS.push(s);
+      this._pubS.push(scalarMul(H_POINT, s));
     }
   }
-                                                                                                      
-  computeBitCommitments(pubXs: readonly (readonly bigint[])[]) {
+
+  // ─── Viem-ready getters (for contract calls) ───────────────────────────────
+
+  get commitment(): G1PointViem { return pointToViem(this._commitment); }
+  get pubX(): G1PointViem[]     { return this._pubX.map(pointToViem); }
+  get pubS(): G1PointViem[]     { return this._pubS.map(pointToViem); }
+
+  get bitZeroCommitments(): G1PointViem[] { return this._bitZeroCommits.map(pointToViem); }
+  get bitOneCommitments():  G1PointViem[] { return this._bitOneCommits.map(pointToViem); }
+
+  // ─── AV-net round-2 tally key computation ────────────────────────────────
+
+  /**
+   * Compute per-bit cryptograms after all bidders have joined.
+   * @param allPubXs  2D array from contract.getPublicXs():
+   *                  allPubXs[i][j] = bidder i's X key for bit position j.
+   */
+  computeBitCommitments(allPubXs: readonly (readonly G1PointViem[])[]) {
+    this._bitZeroCommits = [];
+    this._bitOneCommits  = [];
+
+    const points = allPubXs.map((row) => row.map(viemToPoint));
+
     for (let j = 0; j < L; j++) {
-      let preProd = 1n;
-      let postProd = 1n;
+      // T_i = (∑_{k<i} X_k[j]) - (∑_{k>i} X_k[j])
+      let pre:  G1Point = G_ZERO;
+      let post: G1Point = G_ZERO;
 
-      for (let k = 0; k < this.id; k++) {
-        preProd = modMul(preProd, pubXs[k][j], P);
-      }
-      for (let k = this.id + 1; k < N; k++) {
-        postProd = modMul(postProd, pubXs[k][j], P);
-      }
+      for (let k = 0; k < this.id; k++)      pre  = pointAdd(pre,  points[k][j]);
+      for (let k = this.id + 1; k < N; k++)  post = pointAdd(post, points[k][j]);
 
-      const Ti = modDiv(preProd, postProd, P);
-      this.bitZeroCommitments.push(modPow(Ti, this.privS[j], P));
-      this.bitOneCommitments.push(modPow(Ti, this.privX[j], P));
+      const Ti = pointSub(pre, post);
+
+      // bit=0 (has 0 at this position): s_j * T_i
+      // bit=1 (has 1 at this position, or already lost): x_j * T_i
+      this._bitZeroCommits.push(scalarMul(Ti, this._privS[j]));
+      this._bitOneCommits.push( scalarMul(Ti, this._privX[j]));
     }
   }
 }
-
-function numberToBinaryArray(num: number, length: number): number[] {
-  return num.toString(2).padStart(length, "0").split("").map(Number);
-}
-
